@@ -95,6 +95,7 @@
         <h1>Webhook Logger</h1>
         <div class="filters">
             <input type="text" id="id-filter" placeholder="Filtrar por ID">
+            <input type="text" id="queue-filter" placeholder="Filtrar por ID Queue">
             <div class="date-range">
                 <input type="date" id="date-start" placeholder="Data inicial">
                 <span>até</span>
@@ -163,10 +164,17 @@
                 let matchDate = true;
 
                 // Filtrar por ID (comparação exata)
-                if (idFilter) {
-                    const entryId = entry.data.id?.toString();
-                    matchId = entryId === idFilter;
-                }
+            if (idFilter) {
+                const entryId = entry.data.id?.toString();
+                matchId = entryId === idFilter;
+            }
+
+            // Filtrar por ID Queue
+            const queueFilter = document.getElementById('queue-filter').value;
+            if (queueFilter) {
+                const entryQueueId = entry.data.id_queue?.toString();
+                matchId = matchId && (entryQueueId === queueFilter);
+            }
 
                 // Filtrar por intervalo de datas
                 if (dateStart || dateEnd) {
