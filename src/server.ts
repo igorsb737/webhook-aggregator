@@ -7,13 +7,14 @@ const port = process.env.PORT || 3000;
 // Middleware para processar JSON
 app.use(express.json());
 
-// Estruturas para armazenar mensagens, timers e histórico
+// Estruturas para armazenar mensagens, timers, histórico e status
 const messageBuffers = new Map<string, any[]>();
 const timeouts = new Map<string, NodeJS.Timeout>();
 const queueInfo = new Map<string, {
     id_queue: string;
     messages: any[];
 }>();
+const idStatus = new Map<string, 'online' | 'paused'>();
 
 // Função para gerar id_queue único
 function generateQueueId(): string {
@@ -106,7 +107,7 @@ async function sendAggregatedWebhook(id: string) {
 // Endpoint para receber webhooks
 app.post('/webhook', async (req: express.Request, res: express.Response) => {
     try {
-        const { id, ...messageData } = req.body;
+        const { id, status, ...messageData } = req.body;
         
         if (!id) {
             return res.status(400).json({
@@ -115,17 +116,40 @@ app.post('/webhook', async (req: express.Request, res: express.Response) => {
             });
         }
 
+        // Processar mudança de status se presente
+        if (status === 'paused' || status === 'online') {
+            idStatus.set(id, status);
+            return res.status(200).json({
+                status: 'success',
+                message: `Status do ID ${id} atualizado para ${status}`,
+                data: { id, status }
+            });
+        }
+
+        // Verificar se ID está pausado
+        if (idStatus.get(id) === 'paused') {
+            return res.status(200).json({
+                status: 'success',
+                message: 'Webhook recebido mas não processado - ID está pausado',
+                data: { id, currentStatus: 'paused' }
+            });
+        }
+
         // Verificar se existe uma fila ativa para este ID
         let currentQueueInfo = queueInfo.get(id);
 
-        // Se não existe fila, criar nova
+        // Se não existe fila, criar nova e definir status como online
         if (!currentQueueInfo) {
             currentQueueInfo = {
                 id_queue: generateQueueId(),
                 messages: []
             };
             queueInfo.set(id, currentQueueInfo);
-            console.log(`Nova fila criada - ID: ${id}, Queue ID: ${currentQueueInfo.id_queue}`);
+            // Definir status como online se não existir
+            if (!idStatus.has(id)) {
+                idStatus.set(id, 'online');
+            }
+            console.log(`Nova fila criada - ID: ${id}, Queue ID: ${currentQueueInfo.id_queue}, Status: online`);
         }
 
         // Adicionar mensagem à fila atual (sem incluir id_queue)
@@ -182,15 +206,41 @@ app.post('/webhook', async (req: express.Request, res: express.Response) => {
 
 // Endpoint para consultar histórico
 app.get('/history', (req: express.Request, res: express.Response) => {
-    res.json(webhookHistory);
+    // Converter o Map de status para um array de objetos
+    const statusArray = Array.from(idStatus.entries()).map(([id, status]) => ({
+        id,
+        status: status.toUpperCase(),
+        timestamp: new Date().toISOString(),
+        data: { id }
+    }));
+
+    res.json({
+        ...webhookHistory,
+        status: statusArray
+    });
 });
 
 // Endpoint para limpar histórico
+// Endpoint para consultar status de um ID
+app.get('/status/:id', (req: express.Request, res: express.Response) => {
+    const { id } = req.params;
+    const status = idStatus.get(id) || 'online';
+    
+    res.status(200).json({
+        status: 'success',
+        data: {
+            id,
+            currentStatus: status
+        }
+    });
+});
+
 app.post('/clear-logs', (req: express.Request, res: express.Response) => {
     webhookHistory.received = [];
     webhookHistory.sent = [];
     messageBuffers.clear();
     queueInfo.clear();
+    idStatus.clear();
     
     // Limpar todos os timeouts pendentes
     timeouts.forEach(timeout => clearTimeout(timeout));

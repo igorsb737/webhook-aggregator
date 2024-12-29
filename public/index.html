@@ -49,7 +49,7 @@
         }
         .logs-container {
             display: grid;
-            grid-template-columns: 1fr 1fr;
+            grid-template-columns: 1fr 1fr 1fr;
             gap: 20px;
         }
         .section {
@@ -88,6 +88,42 @@
         .clear-btn:hover {
             background: #4e8ac7;
         }
+        .status-filters {
+            display: flex;
+            gap: 15px;
+            align-items: center;
+        }
+        .status-filters label {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            cursor: pointer;
+        }
+        .status-filters input[type="checkbox"] {
+            cursor: pointer;
+        }
+        .status-entry {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px;
+            background: #2d2d2d;
+            margin: 5px 0;
+            border-radius: 4px;
+        }
+        .status-indicator {
+            padding: 4px 8px;
+            border-radius: 3px;
+            font-size: 0.9em;
+        }
+        .status-online {
+            background: #608b4e;
+            color: white;
+        }
+        .status-paused {
+            background: #d16969;
+            color: white;
+        }
     </style>
 </head>
 <body>
@@ -100,6 +136,14 @@
                 <input type="date" id="date-start" placeholder="Data inicial">
                 <span>até</span>
                 <input type="date" id="date-end" placeholder="Data final">
+            </div>
+            <div class="status-filters">
+                <label>
+                    <input type="checkbox" id="status-online" checked> Online
+                </label>
+                <label>
+                    <input type="checkbox" id="status-paused"> Pausado
+                </label>
             </div>
             <button onclick="applyFilters()" class="filter-btn">Filtrar</button>
             <button onclick="clearLogs()" class="clear-btn">Limpar Logs</button>
@@ -114,6 +158,11 @@
             <div class="section">
                 <h2>Webhooks Enviados</h2>
                 <div id="sent-logs"></div>
+            </div>
+
+            <div class="section">
+                <h2>Status dos IDs</h2>
+                <div id="status-logs"></div>
             </div>
         </div>
     </div>
@@ -149,32 +198,51 @@
             `;
         }
 
+        function createStatusEntry(id, status) {
+            return `
+                <div class="status-entry">
+                    <div>ID: ${id}</div>
+                    <div class="status-indicator status-${status.toLowerCase()}">${status}</div>
+                </div>
+            `;
+        }
+
         let currentData = {
             received: [],
-            sent: []
+            sent: [],
+            status: [] // Array para armazenar o status dos IDs
         };
 
         function filterLogs(logs) {
             const idFilter = document.getElementById('id-filter').value;
             const dateStart = document.getElementById('date-start').value;
             const dateEnd = document.getElementById('date-end').value;
+            const showOnline = document.getElementById('status-online').checked;
+            const showPaused = document.getElementById('status-paused').checked;
 
             return logs.filter(entry => {
                 let matchId = true;
                 let matchDate = true;
+                let matchStatus = true;
 
                 // Filtrar por ID (comparação exata)
-            if (idFilter) {
-                const entryId = entry.data.id?.toString();
-                matchId = entryId === idFilter;
-            }
+                if (idFilter) {
+                    const entryId = entry.data.id?.toString();
+                    matchId = entryId === idFilter;
+                }
 
-            // Filtrar por ID Queue
-            const queueFilter = document.getElementById('queue-filter').value;
-            if (queueFilter) {
-                const entryQueueId = entry.data.id_queue?.toString();
-                matchId = matchId && (entryQueueId === queueFilter);
-            }
+                // Filtrar por ID Queue
+                const queueFilter = document.getElementById('queue-filter').value;
+                if (queueFilter) {
+                    const entryQueueId = entry.data.id_queue?.toString();
+                    matchId = matchId && (entryQueueId === queueFilter);
+                }
+
+                // Filtrar por status
+                if (entry.status) {
+                    matchStatus = (entry.status === 'ONLINE' && showOnline) ||
+                                (entry.status === 'PAUSED' && showPaused);
+                }
 
                 // Filtrar por intervalo de datas
                 if (dateStart || dateEnd) {
@@ -193,19 +261,23 @@
                     }
                 }
 
-                return matchId && matchDate;
+                return matchId && matchDate && matchStatus;
             });
         }
 
         function applyFilters() {
             const filteredReceived = filterLogs(currentData.received);
             const filteredSent = filterLogs(currentData.sent);
+            const filteredStatus = filterLogs(currentData.status);
 
             document.getElementById('received-logs').innerHTML = 
                 filteredReceived.map(createLogEntry).reverse().join('');
             
             document.getElementById('sent-logs').innerHTML = 
                 filteredSent.map(createLogEntry).reverse().join('');
+
+            document.getElementById('status-logs').innerHTML = 
+                filteredStatus.map(entry => createStatusEntry(entry.id, entry.status)).join('');
         }
 
         function updateLogs() {
@@ -224,6 +296,7 @@
                     if (response.ok) {
                         document.getElementById('received-logs').innerHTML = '';
                         document.getElementById('sent-logs').innerHTML = '';
+                        document.getElementById('status-logs').innerHTML = '';
                     } else {
                         console.error('Erro ao limpar logs');
                     }
