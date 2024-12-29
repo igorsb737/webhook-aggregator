@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Webhook Logger</title>
+    <style>
+        body {
+            font-family: monospace;
+            margin: 20px;
+            background: #1e1e1e;
+            color: #d4d4d4;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        .filters {
+            margin-bottom: 20px;
+            display: flex;
+            gap: 15px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .filters input {
+            background: #2d2d2d;
+            border: 1px solid #569cd6;
+            color: #d4d4d4;
+            padding: 8px;
+            border-radius: 4px;
+            font-family: monospace;
+        }
+        .filter-btn {
+            background: #608b4e;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-family: monospace;
+        }
+        .filter-btn:hover {
+            background: #4e7a3e;
+        }
+        .date-range {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        .logs-container {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+        .section {
+            margin-bottom: 20px;
+        }
+        h2 {
+            color: #569cd6;
+            border-bottom: 1px solid #569cd6;
+            padding-bottom: 5px;
+        }
+        .log-entry {
+            background: #2d2d2d;
+            padding: 10px;
+            margin: 5px 0;
+            border-radius: 4px;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+        .timestamp {
+            color: #608b4e;
+            margin-bottom: 5px;
+        }
+        .json {
+            color: #ce9178;
+        }
+        .clear-btn {
+            background: #569cd6;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-family: monospace;
+            margin-bottom: 10px;
+        }
+        .clear-btn:hover {
+            background: #4e8ac7;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Webhook Logger</h1>
+        <div class="filters">
+            <input type="text" id="id-filter" placeholder="Filtrar por ID">
+            <div class="date-range">
+                <input type="date" id="date-start" placeholder="Data inicial">
+                <span>até</span>
+                <input type="date" id="date-end" placeholder="Data final">
+            </div>
+            <button onclick="applyFilters()" class="filter-btn">Filtrar</button>
+            <button onclick="clearLogs()" class="clear-btn">Limpar Logs</button>
+        </div>
+        
+        <div class="logs-container">
+            <div class="section">
+                <h2>Webhooks Recebidos</h2>
+                <div id="received-logs"></div>
+            </div>
+
+            <div class="section">
+                <h2>Webhooks Enviados</h2>
+                <div id="sent-logs"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function formatDate(dateStr) {
+            return new Date(dateStr).toLocaleString('pt-BR');
+        }
+
+        function formatJSON(obj) {
+            return JSON.stringify(obj, null, 2);
+        }
+
+        function createLogEntry(entry) {
+            let responseHtml = '';
+            if (entry.response) {
+                responseHtml = `
+                    <div class="response-info" style="margin-top: 10px; border-top: 1px solid #444; padding-top: 10px;">
+                        <div style="color: ${entry.response.status >= 400 ? '#f14c4c' : '#608b4e'}">
+                            Status: ${entry.response.status}
+                        </div>
+                        <div class="json">${formatJSON(entry.response.data)}</div>
+                    </div>
+                `;
+            }
+
+            return `
+                <div class="log-entry">
+                    <div class="timestamp">${formatDate(entry.timestamp)}</div>
+                    <div class="json">${formatJSON(entry.data)}</div>
+                    ${responseHtml}
+                </div>
+            `;
+        }
+
+        let currentData = {
+            received: [],
+            sent: []
+        };
+
+        function filterLogs(logs) {
+            const idFilter = document.getElementById('id-filter').value;
+            const dateStart = document.getElementById('date-start').value;
+            const dateEnd = document.getElementById('date-end').value;
+
+            return logs.filter(entry => {
+                let matchId = true;
+                let matchDate = true;
+
+                // Filtrar por ID (comparação exata)
+                if (idFilter) {
+                    const entryId = entry.data.id?.toString();
+                    matchId = entryId === idFilter;
+                }
+
+                // Filtrar por intervalo de datas
+                if (dateStart || dateEnd) {
+                    const entryDate = new Date(entry.timestamp);
+                    
+                    if (dateStart) {
+                        const startDate = new Date(dateStart);
+                        startDate.setHours(0, 0, 0, 0);
+                        matchDate = matchDate && entryDate >= startDate;
+                    }
+                    
+                    if (dateEnd) {
+                        const endDate = new Date(dateEnd);
+                        endDate.setHours(23, 59, 59, 999);
+                        matchDate = matchDate && entryDate <= endDate;
+                    }
+                }
+
+                return matchId && matchDate;
+            });
+        }
+
+        function applyFilters() {
+            const filteredReceived = filterLogs(currentData.received);
+            const filteredSent = filterLogs(currentData.sent);
+
+            document.getElementById('received-logs').innerHTML = 
+                filteredReceived.map(createLogEntry).reverse().join('');
+            
+            document.getElementById('sent-logs').innerHTML = 
+                filteredSent.map(createLogEntry).reverse().join('');
+        }
+
+        function updateLogs() {
+            fetch('/history')
+                .then(response => response.json())
+                .then(data => {
+                    currentData = data;
+                    applyFilters();
+                })
+                .catch(error => console.error('Erro ao buscar histórico:', error));
+        }
+
+        function clearLogs() {
+            fetch('/clear-logs', { method: 'POST' })
+                .then(response => {
+                    if (response.ok) {
+                        document.getElementById('received-logs').innerHTML = '';
+                        document.getElementById('sent-logs').innerHTML = '';
+                    } else {
+                        console.error('Erro ao limpar logs');
+                    }
+                })
+                .catch(error => console.error('Erro ao limpar logs:', error));
+        }
+
+        // Atualizar logs a cada 5 segundos
+        updateLogs();
+        setInterval(updateLogs, 5000);
+    </script>
+</body>
+</html>
