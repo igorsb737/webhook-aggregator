@@ -1,68 +1,103 @@
 import express from 'express';
 import axios from 'axios';
+import { createClient } from 'redis';
+import dotenv from 'dotenv';
+
+dotenv.config();
 
 const app = express();
 const port = process.env.PORT || 3000;
+const REDIS_TTL = parseInt(process.env.REDIS_TTL || '86400');
+
+// Criar cliente Redis
+const redisClient = createClient({
+    url: process.env.REDIS_URL || 'redis://localhost:6379'
+});
+
+redisClient.on('error', err => console.error('Redis Client Error:', err));
+
+// Conectar ao Redis
+(async () => {
+    await redisClient.connect();
+})();
 
 // Middleware para processar JSON
 app.use(express.json());
 
-// Estruturas para armazenar mensagens, timers, histórico e status
-const messageBuffers = new Map<string, any[]>();
-const timeouts = new Map<string, NodeJS.Timeout>();
-const queueInfo = new Map<string, {
-    id_queue: string;
-    messages: any[];
-}>();
-const idStatus = new Map<string, 'online' | 'paused'>();
+// Servir arquivos estáticos
+app.use(express.static('public'));
+
+// Funções auxiliares Redis
+async function getQueueInfo(id: string) {
+    const data = await redisClient.get(`queue:${id}`);
+    return data ? JSON.parse(data) : null;
+}
+
+async function setQueueInfo(id: string, info: any) {
+    await redisClient.setEx(`queue:${id}`, REDIS_TTL, JSON.stringify(info));
+}
+
+async function getStatus(id: string) {
+    const status = await redisClient.get(`status:${id}`);
+    if (!status) {
+        await setStatus(id, 'online');
+        return 'online';
+    }
+    return status;
+}
+
+async function setStatus(id: string, status: 'online' | 'paused') {
+    await redisClient.set(`status:${id}`, status);
+}
+
+async function addToHistory(type: 'received' | 'sent', data: any) {
+    const key = `history:${type}`;
+    const history = await redisClient.lRange(key, 0, -1);
+    const parsedHistory = history.map(item => JSON.parse(item));
+    parsedHistory.push({
+        timestamp: new Date().toISOString(),
+        ...data
+    });
+    
+    // Manter apenas os últimos 1000 registros
+    while (parsedHistory.length > 1000) {
+        parsedHistory.shift();
+    }
+    
+    // Atualizar história no Redis
+    await redisClient.del(key);
+    for (const item of parsedHistory) {
+        await redisClient.rPush(key, JSON.stringify(item));
+    }
+}
 
 // Função para gerar id_queue único
 function generateQueueId(): string {
     return Math.random().toString(36).substring(2, 15);
 }
 
-interface WebhookRecord {
-    timestamp: string;
-    data: any;
-}
-
-interface WebhookSentRecord extends WebhookRecord {
-    response: {
-        status: number;
-        data: any;
-    };
-}
-
-const webhookHistory = {
-    received: [] as WebhookRecord[],
-    sent: [] as WebhookSentRecord[]
-};
-
-// Servir arquivos estáticos
-app.use(express.static('public'));
-
 // Função para enviar webhook agregado
 async function sendAggregatedWebhook(id: string) {
     try {
-        const currentQueueInfo = queueInfo.get(id);
-        if (!currentQueueInfo || currentQueueInfo.messages.length === 0) return;
+        const queueInfo = await getQueueInfo(id);
+        if (!queueInfo || queueInfo.messages.length === 0) return;
 
         // Pegar o último webhook recebido
-        const lastMessage = currentQueueInfo.messages[currentQueueInfo.messages.length - 1];
+        const lastMessage = queueInfo.messages[queueInfo.messages.length - 1];
 
         // Concatenar todas as mensagens se houver múltiplas
-        let messages = currentQueueInfo.messages;
+        let messages = queueInfo.messages;
         if (messages.length > 1) {
-            const concatenatedMessage = messages.map(m => m.message).join('\n\n');
+            const concatenatedMessage = messages.map((m: { message: string }) => m.message).join('\n\n');
             messages = [{
                 message: concatenatedMessage
             }];
         }
 
-        // Criar mensagem agregada com todos os dados
+        // Criar mensagem agregada
         const aggregatedMessage = {
             id,
-            id_queue: currentQueueInfo.id_queue,
+            id_queue: queueInfo.id_queue,
             messages: messages,
             timestamp: new Date().toISOString(),
             ...lastMessage
@@ -70,7 +105,7 @@ async function sendAggregatedWebhook(id: string) {
 
         // Enviar webhook agregado
         const response = await axios.post(
-            process.env.WEBHOOK_URL || 'https://n8n.appvendai.com.br/webhook-test/8ee2a9a5-184f-42fe-a197-3b8434227814', 
+            process.env.WEBHOOK_URL || 'https://n8n.appvendai.com.br/webhook-test/8ee2a9a5-184f-42fe-a197-3b8434227814',
             aggregatedMessage,
             {
                 validateStatus: () => true,
@@ -79,15 +114,15 @@ async function sendAggregatedWebhook(id: string) {
                 }
             }
         );
+
         console.log('Webhook agregado enviado:', aggregatedMessage);
         console.log('Resposta do webhook:', {
             status: response.status,
             data: response.data
         });
-        
+
         // Adicionar ao histórico de enviados
-        webhookHistory.sent.push({
-            timestamp: new Date().toISOString(),
+        await addToHistory('sent', {
             data: aggregatedMessage,
             response: {
                 status: response.status,
@@ -95,10 +130,9 @@ async function sendAggregatedWebhook(id: string) {
             }
         });
 
-        // Limpar buffers e remover queueInfo após envio
-        messageBuffers.delete(id);
-        timeouts.delete(id);
-        queueInfo.delete(id);
+        // Limpar dados do Redis
+        await redisClient.del(`queue:${id}`);
+        await redisClient.del(`timer:${id}`);
     } catch (error) {
         console.error('Erro ao enviar webhook agregado:', error);
     }
@@ -108,7 +142,7 @@ async function sendAggregatedWebhook(id: string) {
 app.post('/webhook', async (req: express.Request, res: express.Response) => {
     try {
         const { id, status, ...messageData } = req.body;
-        
+
         if (!id) {
             return res.status(400).json({
                 status: 'error',
@@ -118,7 +152,7 @@ app.post('/webhook', async (req: express.Request, res: express.Response) => {
 
         // Processar mudança de status se presente
         if (status === 'paused' || status === 'online') {
-            idStatus.set(id, status);
+            await setStatus(id, status);
             return res.status(200).json({
                 status: 'success',
                 message: `Status do ID ${id} atualizado para ${status}`,
@@ -127,7 +161,8 @@ app.post('/webhook', async (req: express.Request, res: express.Response) => {
         }
 
         // Verificar se ID está pausado
-        if (idStatus.get(id) === 'paused') {
+        const currentStatus = await getStatus(id);
+        if (currentStatus === 'paused') {
             return res.status(200).json({
                 status: 'success',
                 message: 'Webhook recebido mas não processado - ID está pausado',
@@ -135,8 +170,8 @@ app.post('/webhook', async (req: express.Request, res: express.Response) => {
             });
         }
 
-        // Verificar se existe uma fila ativa para este ID
-        let currentQueueInfo = queueInfo.get(id);
+        // Verificar se existe uma fila ativa
+        let currentQueueInfo = await getQueueInfo(id);
 
         // Se não existe fila, criar nova e definir status como online
         if (!currentQueueInfo) {
@@ -144,55 +179,49 @@ app.post('/webhook', async (req: express.Request, res: express.Response) => {
                 id_queue: generateQueueId(),
                 messages: []
             };
-            queueInfo.set(id, currentQueueInfo);
-            // Definir status como online se não existir
-            if (!idStatus.has(id)) {
-                idStatus.set(id, 'online');
-            }
+            // Definir status como online para novos IDs
+            await setStatus(id, 'online');
             console.log(`Nova fila criada - ID: ${id}, Queue ID: ${currentQueueInfo.id_queue}, Status: online`);
         }
 
-        // Adicionar mensagem à fila atual (sem incluir id_queue)
+        // Adicionar mensagem à fila
         currentQueueInfo.messages.push(messageData);
+        await setQueueInfo(id, currentQueueInfo);
 
-        console.log('Webhook recebido:', { 
-            id, 
+        console.log('Webhook recebido:', {
+            id,
             id_queue: currentQueueInfo.id_queue,
-            ...messageData 
+            ...messageData
         });
 
         // Adicionar ao histórico de recebidos
-        webhookHistory.received.push({
-            timestamp: new Date().toISOString(),
-            data: { 
-                id, 
+        await addToHistory('received', {
+            data: {
+                id,
                 id_queue: currentQueueInfo.id_queue,
-                ...messageData 
+                ...messageData
             }
         });
 
-        // Cancelar timer anterior se existir
-        if (timeouts.has(id)) {
-            clearTimeout(timeouts.get(id));
+        // Configurar novo timer
+        const existingTimer = await redisClient.get(`timer:${id}`);
+        if (existingTimer) {
+            clearTimeout(parseInt(existingTimer));
         }
 
-        // Atualizar buffer de mensagens
-        messageBuffers.set(id, currentQueueInfo.messages);
-
-        // Configurar novo timer para esta mensagem
         const timeout = setTimeout(() => {
             sendAggregatedWebhook(id);
-        }, 60000); // 60 segundos
+        }, 60000);
 
-        timeouts.set(id, timeout);
-        
+        await redisClient.setEx(`timer:${id}`, 70, timeout.toString());
+
         res.status(200).json({
             status: 'success',
             message: 'Webhook recebido com sucesso',
-            data: { 
-                id, 
+            data: {
+                id,
                 id_queue: currentQueueInfo.id_queue,
-                ...messageData 
+                ...messageData
             }
         });
     } catch (error) {
@@ -205,27 +234,45 @@ app.post('/webhook', async (req: express.Request, res: express.Response) => {
 });
 
 // Endpoint para consultar histórico
-app.get('/history', (req: express.Request, res: express.Response) => {
-    // Converter o Map de status para um array de objetos
-    const statusArray = Array.from(idStatus.entries()).map(([id, status]) => ({
-        id,
-        status: status.toUpperCase(),
-        timestamp: new Date().toISOString(),
-        data: { id }
-    }));
+app.get('/history', async (req: express.Request, res: express.Response) => {
+    try {
+        const received = await redisClient.lRange('history:received', 0, -1);
+        const sent = await redisClient.lRange('history:sent', 0, -1);
+        
+        // Buscar todos os status
+        const statusKeys = await redisClient.keys('status:*');
+        const statusPromises = statusKeys.map(async key => {
+            const id = key.split(':')[1];
+            const status = await redisClient.get(key);
+            return {
+                id,
+                status: status?.toUpperCase(),
+                timestamp: new Date().toISOString(),
+                data: { id }
+            };
+        });
+        
+        const statusArray = await Promise.all(statusPromises);
 
-    res.json({
-        ...webhookHistory,
-        status: statusArray
-    });
+        res.json({
+            received: received.map(item => JSON.parse(item)),
+            sent: sent.map(item => JSON.parse(item)),
+            status: statusArray
+        });
+    } catch (error) {
+        console.error('Erro ao buscar histórico:', error);
+        res.status(500).json({
+            status: 'error',
+            message: 'Erro ao buscar histórico'
+        });
+    }
 });
 
-// Endpoint para limpar histórico
 // Endpoint para consultar status de um ID
-app.get('/status/:id', (req: express.Request, res: express.Response) => {
+app.get('/status/:id', async (req: express.Request, res: express.Response) => {
     const { id } = req.params;
-    const status = idStatus.get(id) || 'online';
-    
+    const status = await getStatus(id);
+
     res.status(200).json({
         status: 'success',
         data: {
@@ -235,21 +282,50 @@ app.get('/status/:id', (req: express.Request, res: express.Response) => {
     });
 });
 
-app.post('/clear-logs', (req: express.Request, res: express.Response) => {
-    webhookHistory.received = [];
-    webhookHistory.sent = [];
-    messageBuffers.clear();
-    queueInfo.clear();
-    idStatus.clear();
-    
-    // Limpar todos os timeouts pendentes
-    timeouts.forEach(timeout => clearTimeout(timeout));
-    timeouts.clear();
-    
-    res.status(200).json({
-        status: 'success',
-        message: 'Histórico limpo com sucesso'
-    });
+// Endpoint para limpar logs
+app.post('/clear-logs', async (req: express.Request, res: express.Response) => {
+    try {
+        // Limpar históricos
+        await redisClient.del('history:received');
+        await redisClient.del('history:sent');
+        
+        // Limpar filas e timers
+        const queueKeys = await redisClient.keys('queue:*');
+        const timerKeys = await redisClient.keys('timer:*');
+        const statusKeys = await redisClient.keys('status:*');
+        
+        // Limpar timers ativos
+        for (const key of timerKeys) {
+            const timerId = await redisClient.get(key);
+            if (timerId) {
+                clearTimeout(parseInt(timerId));
+            }
+        }
+        
+        // Deletar todas as chaves
+        const allKeys = [...queueKeys, ...timerKeys, ...statusKeys];
+        if (allKeys.length > 0) {
+            await redisClient.del(allKeys);
+        }
+
+        res.status(200).json({
+            status: 'success',
+            message: 'Histórico limpo com sucesso'
+        });
+    } catch (error) {
+        console.error('Erro ao limpar logs:', error);
+        res.status(500).json({
+            status: 'error',
+            message: 'Erro ao limpar logs'
+        });
+    }
+});
+
+// Graceful shutdown
+process.on('SIGTERM', async () => {
+    console.log('Recebido SIGTERM. Fechando conexões...');
+    await redisClient.quit();
+    process.exit(0);
 });
 
 app.listen(port, () => {
