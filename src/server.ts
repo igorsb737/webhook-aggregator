@@ -21,12 +21,12 @@ async function sendAggregatedWebhook(id: string) {
         const lastMessage = messages[messages.length - 1];
 
         // Criar mensagem agregada com todos os dados
-        const aggregatedMessage = JSON.stringify({
+        const aggregatedMessage = {
             id,
             messages: messages, // Array com todos os webhooks recebidos
             timestamp: new Date().toISOString(),
             ...lastMessage // Incluindo todas as variáveis do último webhook recebido
-        });
+        };
 
         // Enviar webhook agregado
         await axios.post(
