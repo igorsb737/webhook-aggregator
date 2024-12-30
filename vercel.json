@@ -38,11 +38,5 @@
         "REDIS_URL": "@redis_url",
         "REDIS_TTL": "@redis_ttl",
         "WEBHOOK_URL": "@webhook_url"
-    },
-    "functions": {
-        "src/server.ts": {
-            "memory": 1024,
-            "maxDuration": 10
-        }
     }
 }
