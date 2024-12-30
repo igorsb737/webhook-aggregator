@@ -29,5 +29,10 @@
             "src": "/(.*)",
             "dest": "/public/$1"
         }
-    ]
+    ],
+    "env": {
+        "REDIS_URL": "@redis_url",
+        "REDIS_TTL": "@redis_ttl",
+        "WEBHOOK_URL": "@webhook_url"
+    }
 }
