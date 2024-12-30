@@ -39,6 +39,9 @@ interface HistoryItem {
 
 type RedisClient = ReturnType<typeof createClient>;
 
+// Mapa para armazenar os timeouts de cada fila
+const queueTimeouts = new Map<string, NodeJS.Timeout>();
+
 // Função para criar cliente Redis com retry
 async function getRedisClient(): Promise<RedisClient> {
     console.log('Iniciando conexão com Redis...');
@@ -105,18 +108,24 @@ app.use(express.json());
 // Servir arquivos estáticos
 app.use(express.static('public'));
 
+// Cliente Redis global
+let redisClient: RedisClient | null = null;
+
 // Função para garantir que temos um cliente Redis válido
+async function getOrCreateRedisClient(): Promise<RedisClient> {
+    if (!redisClient) {
+        redisClient = await getRedisClient();
+    }
+    return redisClient;
+}
+
 async function withRedisClient<T>(operation: (client: RedisClient) => Promise<T>): Promise<T> {
-    const client = await getRedisClient();
+    const client = await getOrCreateRedisClient();
     try {
         return await operation(client);
-    } finally {
-        try {
-            await client.quit();
-            console.log('Conexão Redis fechada com sucesso');
-        } catch (error) {
-            console.error('Erro ao fechar conexão Redis:', error);
-        }
+    } catch (error) {
+        console.error('Erro na operação Redis:', error);
+        throw error;
     }
 }
 
@@ -203,13 +212,17 @@ function generateQueueId(): string {
 }
 
 async function sendAggregatedWebhook(client: RedisClient, id: string): Promise<void> {
+    console.log(`[${new Date().toISOString()}] Iniciando envio de webhook agregado para ID: ${id}`);
+    let aggregatedMessage: any;
+    
     try {
-        console.log(`Iniciando envio de webhook agregado para ID: ${id}`);
         const queueInfo = await getQueueInfo(client, id);
         if (!queueInfo || queueInfo.messages.length === 0) {
-            console.log(`Nenhuma mensagem para enviar para ID: ${id}`);
+            console.log(`[${new Date().toISOString()}] Nenhuma mensagem para enviar para ID: ${id}`);
             return;
         }
+        
+        console.log(`[${new Date().toISOString()}] Conteúdo da fila para ID ${id}:`, JSON.stringify(queueInfo));
 
         const lastMessage = queueInfo.messages[queueInfo.messages.length - 1];
         let messages = queueInfo.messages;
@@ -222,7 +235,7 @@ async function sendAggregatedWebhook(client: RedisClient, id: string): Promise<v
             }];
         }
 
-        const aggregatedMessage = {
+        aggregatedMessage = {
             id,
             id_queue: queueInfo.id_queue,
             messages: messages,
@@ -232,23 +245,38 @@ async function sendAggregatedWebhook(client: RedisClient, id: string): Promise<v
 
         console.log(`Enviando webhook agregado para ID ${id}:`, aggregatedMessage);
         
-        const response = await axios.post(
-            process.env.WEBHOOK_URL || 'https://n8n.appvendai.com.br/webhook/8ee2a9a5-184f-42fe-a197-3b8434227814',
-            aggregatedMessage,
-            {
-                timeout: 8000,
-                validateStatus: () => true,
-                headers: {
-                    'Content-Type': 'application/json'
+        let response: { status: number; data: any };
+        try {
+            const axiosResponse = await axios.post(
+                process.env.WEBHOOK_URL || 'https://n8n.appvendai.com.br/webhook/8ee2a9a5-184f-42fe-a197-3b8434227814',
+                aggregatedMessage,
+                {
+                    timeout: 8000,
+                    validateStatus: () => true,
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
                 }
-            }
-        );
+            );
 
-        console.log(`Resposta do webhook para ID ${id}:`, {
-            status: response.status,
-            data: response.data
-        });
+            response = {
+                status: axiosResponse.status,
+                data: axiosResponse.data
+            };
 
+            console.log(`Resposta do webhook para ID ${id}:`, response);
+        } catch (error) {
+            console.error(`Erro na requisição do webhook para ID ${id}:`, error);
+            response = {
+                status: 0,
+                data: {
+                    error: error instanceof Error ? error.message : 'Erro desconhecido',
+                    code: (error as any).code
+                }
+            };
+        }
+
+        // Registra o envio no histórico independente do resultado
         await addToHistory(client, 'sent', {
             data: aggregatedMessage,
             response: {
@@ -257,12 +285,67 @@ async function sendAggregatedWebhook(client: RedisClient, id: string): Promise<v
             }
         });
 
+        // Se houve erro na requisição, lança para ser tratado pelo catch externo
+        if (response.status === 0) {
+            throw new Error(`Falha no envio do webhook: ${response.data.error}`);
+        }
+
         await client.del(`queue:${id}`);
-        await client.del(`lastMessage:${id}`);
+        queueTimeouts.delete(id);
         console.log(`Processo de webhook concluído para ID: ${id}`);
     } catch (error) {
-        console.error(`Erro ao enviar webhook agregado para ID ${id}:`, error);
+        console.error(`[${new Date().toISOString()}] Erro ao enviar webhook agregado para ID ${id}:`, error);
+        // Em caso de erro, limpa a fila e o timeout para evitar loop infinito
+        await client.del(`queue:${id}`);
+        queueTimeouts.delete(id);
+        console.log(`Fila removida após erro para ID: ${id}`);
     }
+}
+
+// Função para processar uma fila específica
+async function processQueue(id: string) {
+    console.log(`[${new Date().toISOString()}] Processando fila para ID: ${id}`);
+    try {
+        const client = await getOrCreateRedisClient();
+        const queueInfo = await getQueueInfo(client, id);
+        
+        if (!queueInfo || queueInfo.messages.length === 0) {
+            console.log(`[${new Date().toISOString()}] Fila vazia para ID ${id}, removendo timeout`);
+            queueTimeouts.delete(id);
+            return;
+        }
+
+        console.log(`[${new Date().toISOString()}] Iniciando processamento para ID ${id} com ${queueInfo.messages.length} mensagens`);
+        await sendAggregatedWebhook(client, id);
+        
+    } catch (error) {
+        console.error(`[${new Date().toISOString()}] Erro ao processar fila ${id}:`, error);
+        const client = await getOrCreateRedisClient();
+        await client.del(`queue:${id}`);
+        queueTimeouts.delete(id);
+        console.log(`Fila removida após erro de processamento para ID: ${id}`);
+    }
+}
+
+// Função para agendar o processamento de uma fila
+function scheduleQueueProcessing(id: string) {
+    console.log(`[${new Date().toISOString()}] Tentando agendar processamento para ID: ${id}`);
+    
+    // Cancela qualquer timeout existente para este ID
+    if (queueTimeouts.has(id)) {
+        console.log(`[${new Date().toISOString()}] Cancelando timeout existente para ID: ${id}`);
+        clearTimeout(queueTimeouts.get(id));
+        queueTimeouts.delete(id);
+    }
+
+    // Agenda novo processamento para daqui a 60 segundos
+    console.log(`[${new Date().toISOString()}] Agendando novo processamento da fila ${id} para daqui a ${AGGREGATION_WINDOW}ms`);
+    const timeout = setTimeout(() => {
+        console.log(`[${new Date().toISOString()}] Executando timeout agendado para ID: ${id}`);
+        processQueue(id);
+    }, AGGREGATION_WINDOW);
+    
+    queueTimeouts.set(id, timeout);
 }
 
 // Endpoint para receber webhooks
@@ -322,12 +405,9 @@ app.post('/webhook', async (req: express.Request, res: express.Response) => {
                 }
             });
 
-            const lastMessageTime = await client.get(`lastMessage:${id}`);
-            const now = Date.now();
-            
-            // Apenas atualiza o timestamp e guarda a mensagem
-            console.log(`Atualizando timestamp para agregação futura - ID: ${id}`);
-            await client.setEx(`lastMessage:${id}`, 65, now.toString());
+            // Agenda/reagenda o processamento desta fila
+            scheduleQueueProcessing(id);
+            console.log(`Mensagem adicionada à fila e processamento agendado - ID: ${id}`);
 
             return res.status(200).json({
                 status: 'success',
@@ -443,6 +523,10 @@ app.post('/clear-logs', async (req: express.Request, res: express.Response) => {
             }
         });
 
+        // Limpa todos os timeouts
+        queueTimeouts.forEach(timeout => clearTimeout(timeout));
+        queueTimeouts.clear();
+
         console.log('Logs limpos com sucesso');
         res.status(200).json({
             status: 'success',
@@ -457,68 +541,48 @@ app.post('/clear-logs', async (req: express.Request, res: express.Response) => {
     }
 });
 
-// Função para processar filas pendentes
-async function processQueuesPeriodically() {
-    console.log('Iniciando verificação periódica de filas...');
-    try {
-        await withRedisClient(async (client) => {
-            // Primeiro, busca todas as filas ativas
-            const queueKeys = await client.keys('queue:*');
-            console.log(`Encontradas ${queueKeys.length} filas para verificação`);
-
-            for (const queueKey of queueKeys) {
-                const id = queueKey.split(':')[1];
-                console.log(`Verificando fila do ID: ${id}`);
-
-                const lastMessageTime = await client.get(`lastMessage:${id}`);
-                if (!lastMessageTime) {
-                    console.log(`Nenhum lastMessage encontrado para ID ${id}, ignorando`);
-                    continue;
-                }
-
-                const now = Date.now();
-                const timeSinceLastMessage = now - parseInt(lastMessageTime);
-                console.log(`Tempo desde última mensagem para ID ${id}: ${timeSinceLastMessage}ms`);
-
-                if (timeSinceLastMessage >= AGGREGATION_WINDOW) {
-                    console.log(`Tempo de agregação atingido para ID ${id}, enviando webhook`);
-                    await sendAggregatedWebhook(client, id);
-                } else {
-                    console.log(`Ainda dentro da janela de agregação para ID ${id}, faltam ${AGGREGATION_WINDOW - timeSinceLastMessage}ms`);
-                }
-            }
-        });
-    } catch (error) {
-        console.error('Erro ao processar filas:', error);
-    }
-}
-
-// Iniciar verificação periódica das filas
-const processingInterval = setInterval(processQueuesPeriodically, 1000); // Verifica a cada 1 segundo
-
-// Garantir que o intervalo seja limpo quando a aplicação for encerrada
+// Garantir que os timeouts sejam limpos quando a aplicação for encerrada
 process.on('SIGTERM', () => {
-    clearInterval(processingInterval);
+    queueTimeouts.forEach(timeout => clearTimeout(timeout));
     process.exit(0);
 });
 
 process.on('SIGINT', () => {
-    clearInterval(processingInterval);
+    queueTimeouts.forEach(timeout => clearTimeout(timeout));
     process.exit(0);
 });
 
-app.listen(port, () => {
+app.listen(port, async () => {
     console.log(`Servidor rodando em http://localhost:${port}`);
     console.log('Versão do Node:', process.version);
     console.log('Ambiente:', process.env.NODE_ENV);
     
-    // Teste inicial de conexão com Redis
-    getRedisClient()
-        .then(async (client) => {
-            console.log('Teste inicial de conexão com Redis bem sucedido');
-            await client.quit();
-        })
-        .catch(error => {
-            console.error('Erro no teste inicial de conexão com Redis:', error);
-        });
+    try {
+        // Inicializa o cliente Redis global
+        redisClient = await getRedisClient();
+        console.log('Cliente Redis global inicializado com sucesso');
+    } catch (error) {
+        console.error('Erro ao inicializar cliente Redis global:', error);
+        process.exit(1);
+    }
 });
+
+// Limpeza adequada na finalização
+async function cleanup() {
+    console.log('Iniciando limpeza...');
+    queueTimeouts.forEach(timeout => clearTimeout(timeout));
+    queueTimeouts.clear();
+    
+    if (redisClient) {
+        try {
+            await redisClient.quit();
+            console.log('Conexão Redis fechada com sucesso');
+        } catch (error) {
+            console.error('Erro ao fechar conexão Redis:', error);
+        }
+    }
+    process.exit(0);
+}
+
+process.on('SIGTERM', cleanup);
+process.on('SIGINT', cleanup);
