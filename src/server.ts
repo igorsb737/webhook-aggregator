@@ -459,18 +459,32 @@ app.post('/clear-logs', async (req: express.Request, res: express.Response) => {
 
 // Função para processar filas pendentes
 async function processQueuesPeriodically() {
+    console.log('Iniciando verificação periódica de filas...');
     try {
         await withRedisClient(async (client) => {
-            const lastMessageKeys = await client.keys('lastMessage:*');
-            const now = Date.now();
+            // Primeiro, busca todas as filas ativas
+            const queueKeys = await client.keys('queue:*');
+            console.log(`Encontradas ${queueKeys.length} filas para verificação`);
 
-            for (const key of lastMessageKeys) {
-                const id = key.split(':')[1];
-                const lastMessageTime = await client.get(key);
-                
-                if (lastMessageTime && (now - parseInt(lastMessageTime)) >= AGGREGATION_WINDOW) {
-                    console.log(`Processando fila para ID ${id} após tempo de agregação`);
+            for (const queueKey of queueKeys) {
+                const id = queueKey.split(':')[1];
+                console.log(`Verificando fila do ID: ${id}`);
+
+                const lastMessageTime = await client.get(`lastMessage:${id}`);
+                if (!lastMessageTime) {
+                    console.log(`Nenhum lastMessage encontrado para ID ${id}, ignorando`);
+                    continue;
+                }
+
+                const now = Date.now();
+                const timeSinceLastMessage = now - parseInt(lastMessageTime);
+                console.log(`Tempo desde última mensagem para ID ${id}: ${timeSinceLastMessage}ms`);
+
+                if (timeSinceLastMessage >= AGGREGATION_WINDOW) {
+                    console.log(`Tempo de agregação atingido para ID ${id}, enviando webhook`);
                     await sendAggregatedWebhook(client, id);
+                } else {
+                    console.log(`Ainda dentro da janela de agregação para ID ${id}, faltam ${AGGREGATION_WINDOW - timeSinceLastMessage}ms`);
                 }
             }
         });
@@ -480,7 +494,18 @@ async function processQueuesPeriodically() {
 }
 
 // Iniciar verificação periódica das filas
-setInterval(processQueuesPeriodically, 5000); // Verifica a cada 5 segundos
+const processingInterval = setInterval(processQueuesPeriodically, 1000); // Verifica a cada 1 segundo
+
+// Garantir que o intervalo seja limpo quando a aplicação for encerrada
+process.on('SIGTERM', () => {
+    clearInterval(processingInterval);
+    process.exit(0);
+});
+
+process.on('SIGINT', () => {
+    clearInterval(processingInterval);
+    process.exit(0);
+});
 
 app.listen(port, () => {
     console.log(`Servidor rodando em http://localhost:${port}`);
