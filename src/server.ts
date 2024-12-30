@@ -233,7 +233,7 @@ async function sendAggregatedWebhook(client: RedisClient, id: string): Promise<v
         console.log(`Enviando webhook agregado para ID ${id}:`, aggregatedMessage);
         
         const response = await axios.post(
-            process.env.WEBHOOK_URL || 'https://n8n.appvendai.com.br/webhook-test/8ee2a9a5-184f-42fe-a197-3b8434227814',
+            process.env.WEBHOOK_URL || 'https://n8n.appvendai.com.br/webhook/8ee2a9a5-184f-42fe-a197-3b8434227814',
             aggregatedMessage,
             {
                 timeout: 8000,
