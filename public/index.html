@@ -280,14 +280,59 @@
                 filteredStatus.map(entry => createStatusEntry(entry.id, entry.status)).join('');
         }
 
-        function updateLogs() {
-            fetch('/history')
-                .then(response => response.json())
-                .then(data => {
-                    currentData = data;
-                    applyFilters();
-                })
-                .catch(error => console.error('Erro ao buscar histórico:', error));
+        async function updateLogs(retryCount = 0) {
+            try {
+                const response = await fetch('/history');
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                
+                const text = await response.text();
+                let data;
+                
+                try {
+                    data = JSON.parse(text);
+                } catch (e) {
+                    console.error('Resposta inválida:', text);
+                    throw new Error('Resposta inválida do servidor');
+                }
+                
+                currentData = data;
+                applyFilters();
+                
+                // Limpar mensagem de erro se existir
+                const errorDiv = document.getElementById('error-message');
+                if (errorDiv) {
+                    errorDiv.remove();
+                }
+            } catch (error) {
+                console.error('Erro ao buscar histórico:', error);
+                
+                // Tentar novamente até 3 vezes com delay exponencial
+                if (retryCount < 3) {
+                    const delay = Math.pow(2, retryCount) * 1000;
+                    console.log(`Tentando novamente em ${delay}ms...`);
+                    setTimeout(() => updateLogs(retryCount + 1), delay);
+                } else {
+                    // Mostrar mensagem de erro para o usuário
+                    let errorDiv = document.getElementById('error-message');
+                    if (!errorDiv) {
+                        errorDiv = document.createElement('div');
+                        errorDiv.id = 'error-message';
+                        errorDiv.style.cssText = `
+                            background: #d16969;
+                            color: white;
+                            padding: 10px;
+                            margin: 10px 0;
+                            border-radius: 4px;
+                            text-align: center;
+                        `;
+                        document.querySelector('.filters').after(errorDiv);
+                    }
+                    errorDiv.textContent = `Erro ao carregar dados: ${error.message}. Tentando reconectar...`;
+                }
+            }
         }
 
         function clearLogs() {

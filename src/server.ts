@@ -44,7 +44,7 @@ async function getRedisClient(): Promise<RedisClient> {
     console.log('Iniciando conexão com Redis...');
     
     const client = createClient({
-        url: process.env.REDIS_URL || 'redis://localhost:6379',
+        url: process.env.REDIS_URL,
         socket: {
             reconnectStrategy: (retries) => {
                 console.log(`Tentativa de reconexão ${retries}`);
@@ -60,9 +60,13 @@ async function getRedisClient(): Promise<RedisClient> {
     client.on('error', err => {
         console.error('Redis Client Error:', err);
         console.error('Redis Connection Details:', {
-            url: process.env.REDIS_URL ? 'Configurado' : 'Não configurado',
             error: err.message,
-            stack: err.stack
+            stack: err.stack,
+            code: err.code,
+            syscall: (err as any).syscall,
+            hostname: (err as any).hostname,
+            address: (err as any).address,
+            port: (err as any).port
         });
     });
 
@@ -75,12 +79,18 @@ async function getRedisClient(): Promise<RedisClient> {
     });
 
     try {
+        console.log('Tentando conectar ao Redis Cloud...');
         await client.connect();
-        console.log('Conexão com Redis estabelecida');
+        console.log('Conexão com Redis Cloud estabelecida');
         
         // Teste de conexão
-        await client.ping();
-        console.log('Redis PING successful');
+        const pingResult = await client.ping();
+        console.log('Redis PING successful:', pingResult);
+        
+        // Teste de operação básica
+        await client.set('test_key', 'test_value', { EX: 60 });
+        const testValue = await client.get('test_key');
+        console.log('Redis teste de operação básica:', testValue === 'test_value' ? 'Sucesso' : 'Falha');
         
         return client;
     } catch (error) {
