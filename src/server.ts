@@ -251,11 +251,13 @@ async function sendAggregatedWebhook(client: RedisClient, id: string): Promise<v
                 process.env.WEBHOOK_URL || 'https://n8n.appvendai.com.br/webhook/8ee2a9a5-184f-42fe-a197-3b8434227814',
                 aggregatedMessage,
                 {
-                    timeout: 8000,
+                    timeout: 30000, // Aumentado para 30 segundos
                     validateStatus: () => true,
                     headers: {
                         'Content-Type': 'application/json'
-                    }
+                    },
+                    maxRetries: 3,
+                    retryDelay: 1000
                 }
             );
 
