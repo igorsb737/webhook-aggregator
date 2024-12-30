@@ -325,13 +325,9 @@ app.post('/webhook', async (req: express.Request, res: express.Response) => {
             const lastMessageTime = await client.get(`lastMessage:${id}`);
             const now = Date.now();
             
-            if (!lastMessageTime || (now - parseInt(lastMessageTime)) >= AGGREGATION_WINDOW) {
-                console.log(`Enviando webhook imediatamente para ID ${id}`);
-                await sendAggregatedWebhook(client, id);
-            } else {
-                console.log(`Atualizando timestamp para agregação futura - ID: ${id}`);
-                await client.setEx(`lastMessage:${id}`, 65, now.toString());
-            }
+            // Apenas atualiza o timestamp e guarda a mensagem
+            console.log(`Atualizando timestamp para agregação futura - ID: ${id}`);
+            await client.setEx(`lastMessage:${id}`, 65, now.toString());
 
             return res.status(200).json({
                 status: 'success',
@@ -460,6 +456,31 @@ app.post('/clear-logs', async (req: express.Request, res: express.Response) => {
         });
     }
 });
+
+// Função para processar filas pendentes
+async function processQueuesPeriodically() {
+    try {
+        await withRedisClient(async (client) => {
+            const lastMessageKeys = await client.keys('lastMessage:*');
+            const now = Date.now();
+
+            for (const key of lastMessageKeys) {
+                const id = key.split(':')[1];
+                const lastMessageTime = await client.get(key);
+                
+                if (lastMessageTime && (now - parseInt(lastMessageTime)) >= AGGREGATION_WINDOW) {
+                    console.log(`Processando fila para ID ${id} após tempo de agregação`);
+                    await sendAggregatedWebhook(client, id);
+                }
+            }
+        });
+    } catch (error) {
+        console.error('Erro ao processar filas:', error);
+    }
+}
+
+// Iniciar verificação periódica das filas
+setInterval(processQueuesPeriodically, 5000); // Verifica a cada 5 segundos
 
 app.listen(port, () => {
     console.log(`Servidor rodando em http://localhost:${port}`);
