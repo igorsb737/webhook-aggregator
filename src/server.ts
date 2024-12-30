@@ -8,7 +8,7 @@ dotenv.config();
 const app = express();
 const port = process.env.PORT || 3000;
 const REDIS_TTL = parseInt(process.env.REDIS_TTL || '86400');
-const AGGREGATION_WINDOW = 10000; // 10 segundos de janela para agregação
+const AGGREGATION_WINDOW = 60000; // 60 segundos de janela para agregação
 
 // Log das variáveis de ambiente (sem dados sensíveis)
 console.log('Environment Check:', {
@@ -330,7 +330,7 @@ app.post('/webhook', async (req: express.Request, res: express.Response) => {
                 await sendAggregatedWebhook(client, id);
             } else {
                 console.log(`Atualizando timestamp para agregação futura - ID: ${id}`);
-                await client.setEx(`lastMessage:${id}`, 15, now.toString());
+                await client.setEx(`lastMessage:${id}`, 65, now.toString());
             }
 
             return res.status(200).json({

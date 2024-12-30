@@ -35,8 +35,8 @@
         }
     ],
     "env": {
-        "REDIS_URL": "@redis_url",
-        "REDIS_TTL": "@redis_ttl",
-        "WEBHOOK_URL": "@webhook_url"
+        "REDIS_URL": "redis://:AkhSe7AwIHaRC8Ou5cpnkwLAZItu1cqJ@redis-16061.c92.us-east-1-3.ec2.redns.redis-cloud.com:16061",
+        "REDIS_TTL": "86400",
+        "WEBHOOK_URL": "https://n8n.appvendai.com.br/webhook-test/8ee2a9a5-184f-42fe-a197-3b8434227814"
     }
 }
